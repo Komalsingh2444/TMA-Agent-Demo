@@ -1,0 +1,469 @@
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Task Manager Agent</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Configure Tailwind for a nice look -->
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        'primary': '#4f46e5', // Indigo-600
+                        'secondary': '#1f2937', // Gray-800
+                        'tertiary': '#374151', // Gray-700
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                    },
+                }
+            }
+        }
+    </script>
+    <style>
+        /* Custom styles for the responsive modal/toast */
+        .reminder-popup {
+            transition: transform 0.3s ease-out, opacity 0.3s ease-out;
+            transform: translateX(100%);
+            opacity: 0;
+            pointer-events: none;
+        }
+        .reminder-popup.active {
+            transform: translateX(0);
+            opacity: 1;
+            pointer-events: auto;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 font-sans min-h-screen p-4 sm:p-8">
+
+    <div class="max-w-4xl mx-auto">
+        <h1 class="text-4xl font-extrabold text-white mb-6 text-center">
+            Task Manager Agent (TMA)
+        </h1>
+        <p class="text-gray-400 text-center mb-10">
+            Your personal assistant for tracking tasks and ensuring timely reminders.
+        </p>
+
+        <!-- Task Input Card (Step 2A) -->
+        <div class="bg-secondary p-6 rounded-xl shadow-2xl mb-10 border border-primary/50">
+            <h2 class="text-xl font-semibold mb-4 text-primary">Schedule a New Task</h2>
+            <form id="task-form" class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <input type="text" id="task-name" placeholder="Task Name (e.g., Submit report)" required
+                        class="col-span-1 md:col-span-1 p-3 rounded-lg bg-gray-700 border border-gray-600 focus:ring-primary focus:border-primary">
+                
+                <!-- Date and Time Input Combined -->
+                <input type="datetime-local" id="task-due-time" required
+                        class="col-span-1 md:col-span-1 p-3 rounded-lg bg-gray-700 border border-gray-600 focus:ring-primary focus:border-primary">
+
+                <button type="submit"
+                        class="col-span-1 p-3 rounded-lg bg-primary hover:bg-indigo-500 font-bold transition duration-200 shadow-md">
+                    Add Task
+                </button>
+            </form>
+        </div>
+
+        <!-- Task List Card (Step 2B) -->
+        <div class="bg-secondary p-6 rounded-xl shadow-2xl border border-primary/50">
+            <h2 class="text-xl font-semibold mb-4 text-white">Active Tasks (<span id="task-count">0</span>)</h2>
+            <div id="tasks-list" class="space-y-3">
+                <!-- Tasks will be rendered here -->
+            </div>
+            <p id="no-tasks-message" class="text-gray-500 italic text-center py-8">
+                No tasks scheduled yet.
+            </p>
+        </div>
+    </div>
+
+    <!-- Reminder Pop-up (Toast Notification) (Step 2C) -->
+    <div id="reminder-toast"
+         class="reminder-popup fixed top-4 right-4 w-full max-w-sm p-4 rounded-xl bg-red-700/90 backdrop-blur-sm shadow-2xl z-50 transition-all duration-500 ease-out border-t-4 border-red-400">
+        <div class="flex items-start space-x-4">
+            <svg class="w-6 h-6 text-yellow-300 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.398 16c-.77 1.333.192 3 1.732 3z"></path>
+            </svg>
+            <div class="flex-grow">
+                <h3 class="text-lg font-bold text-white">AGENT ALERT: Task Due!</h3>
+                <p id="toast-message" class="text-gray-200 mt-1 text-sm">
+                    {Reminder message will be inserted here}
+                </p>
+            </div>
+            <button id="close-toast" class="text-gray-300 hover:text-white transition duration-150 p-1 rounded-full -mt-1 -mr-1">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+            </button>
+        </div>
+    </div>
+
+    <script>
+        // --- Configuration and Initialization ---
+        const taskForm = document.getElementById('task-form');
+        const tasksList = document.getElementById('tasks-list');
+        const taskNameInput = document.getElementById('task-name');
+        const taskDueTimeInput = document.getElementById('task-due-time');
+        const taskCount = document.getElementById('task-count');
+        const noTasksMessage = document.getElementById('no-tasks-message');
+        const reminderToast = document.getElementById('reminder-toast');
+        const toastMessage = document.getElementById('toast-message');
+
+        let tasks = [];
+        // Map to store setTimeout IDs for precise reminders (in-memory for the current session)
+        const exactReminderTimeouts = {}; 
+        const REMINDER_CHECK_INTERVAL_MS = 60000; // Check every 60 seconds (for 5-min pre-reminder)
+        
+        // State for managing notification permission status
+        let notificationPermission = 'default';
+
+        // Helper function to format date/time
+        const formatTime = (isoString) => {
+            const date = new Date(isoString);
+            return date.toLocaleString('en-US', {
+                month: 'short',
+                day: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit',
+                hour12: true
+            });
+        };
+
+        // --- Notification Permission Handling ---
+        
+        /**
+         * Requests permission from the user to display system notifications.
+         */
+        const requestNotificationPermission = async () => {
+            if (!('Notification' in window)) {
+                console.warn("This browser does not support desktop notification.");
+                return;
+            }
+
+            // Update permission status on load
+            notificationPermission = Notification.permission;
+
+            if (notificationPermission === 'default') {
+                try {
+                    const permission = await Notification.requestPermission();
+                    notificationPermission = permission;
+                    if (permission === 'granted') {
+                        console.log("Notification permission granted. Background alerts are enabled.");
+                    } else {
+                        console.warn("Notification permission denied. Alerts will only work while the tab is active.");
+                    }
+                } catch (error) {
+                    console.error("Error requesting notification permission:", error);
+                }
+            }
+        };
+
+
+        // --- Timer Management ---
+
+        /**
+         * Schedules a specific setTimeout to trigger the 'due NOW' reminder.
+         * @param {Object} task - The task object.
+         */
+        const scheduleExactReminder = (task) => {
+            // 1. Cancel any existing timer for this task
+            cancelExactReminder(task.id);
+
+            const now = Date.now();
+            // Add a small buffer (500ms) to ensure the timer fires slightly after the due time
+            const delay = task.dueTime - now + 500; 
+
+            // Only schedule if the task is not completed and the due time is in the future
+            if (!task.completed && delay > 1000) { 
+                const timerId = setTimeout(() => {
+                    const currentTask = tasks.find(t => t.id === task.id);
+                    if (currentTask && !currentTask.completed) {
+                        const message = `CRITICAL: Task "${currentTask.name}" is due NOW. Please confirm completion immediately.`;
+                        showPopup(message);
+
+                        // Mark task as reminded and save
+                        currentTask.reminded = true;
+                        saveTasks(); 
+                        
+                        delete exactReminderTimeouts[currentTask.id]; 
+                    }
+                }, delay);
+                
+                exactReminderTimeouts[task.id] = timerId;
+                console.log(`Scheduled exact reminder for task ID ${task.id} in ${Math.round(delay / 1000)} seconds.`);
+            } else if (!task.completed && delay <= 1000 && !task.reminded) {
+                // If the task is already due but not reminded (e.g., loaded from storage immediately after passing due time)
+                // Trigger the reminder immediately without waiting for the interval.
+                const message = `CRITICAL: Task "${task.name}" is due NOW. Please confirm completion immediately.`;
+                showPopup(message);
+                task.reminded = true;
+                saveTasks();
+            }
+        };
+
+        /**
+         * Cancels a scheduled exact reminder for a task.
+         * @param {number} taskId - The ID of the task.
+         */
+        const cancelExactReminder = (taskId) => {
+            if (exactReminderTimeouts[taskId]) {
+                clearTimeout(exactReminderTimeouts[taskId]);
+                delete exactReminderTimeouts[taskId];
+                console.log(`Canceled exact reminder for task ID ${taskId}.`);
+            }
+        };
+
+
+        // --- Data Persistence (Local Storage) (Step 3) ---
+
+        /**
+         * Loads tasks from browser's localStorage.
+         */
+        const loadTasks = () => {
+            // Cancel all existing timers before loading new state
+            Object.values(exactReminderTimeouts).forEach(clearTimeout);
+            Object.keys(exactReminderTimeouts).forEach(key => delete exactReminderTimeouts[key]);
+
+            try {
+                const storedTasks = localStorage.getItem('taskManagerAgentTasks');
+                tasks = storedTasks ? JSON.parse(storedTasks) : [];
+                // Ensure due times are treated as numbers for comparison
+                tasks = tasks.map(task => ({
+                    ...task,
+                    // Use a unique ID based on creation time for timer management
+                    id: task.id || Date.now() + Math.random(), 
+                    dueTime: new Date(task.dueTime).getTime() // Convert ISO string to timestamp
+                }));
+                
+                // Schedule all active, non-reminded tasks
+                tasks.filter(t => !t.completed).forEach(scheduleExactReminder);
+
+                renderTasks();
+            } catch (error) {
+                console.error("Error loading tasks from local storage:", error);
+                // Fallback to empty array if storage fails
+                tasks = [];
+            }
+        };
+
+        /**
+         * Saves the current task array to browser's localStorage.
+         */
+        const saveTasks = () => {
+            // Convert timestamps back to ISO strings for stable storage/retrieval
+            const tasksToStore = tasks.map(task => ({
+                ...task,
+                dueTime: new Date(task.dueTime).toISOString()
+            }));
+            localStorage.setItem('taskManagerAgentTasks', JSON.stringify(tasksToStore));
+            renderTasks();
+        };
+
+        // --- Task Management Functions (Step 4) ---
+
+        /**
+         * Renders the current list of tasks to the DOM.
+         */
+        const renderTasks = () => {
+            tasksList.innerHTML = '';
+            // Sort tasks by due time (closest due first)
+            tasks.sort((a, b) => a.dueTime - b.dueTime);
+
+            if (tasks.length === 0) {
+                noTasksMessage.classList.remove('hidden');
+                taskCount.textContent = 0;
+                return;
+            }
+
+            noTasksMessage.classList.add('hidden');
+            taskCount.textContent = tasks.length;
+
+            tasks.forEach((task) => {
+                const isCompleted = task.completed;
+                const dueDate = new Date(task.dueTime);
+                const isOverdue = !isCompleted && dueDate.getTime() < Date.now();
+
+                const taskElement = document.createElement('div');
+                taskElement.className = `flex items-center justify-between p-4 rounded-lg transition duration-200 ${isCompleted ? 'bg-gray-700 opacity-60' : isOverdue ? 'bg-red-900/40 border border-red-600' : 'bg-tertiary hover:bg-gray-600/50'}`;
+                taskElement.innerHTML = `
+                    <div class="flex-1 min-w-0 mr-4">
+                        <p class="text-lg font-medium truncate ${isCompleted ? 'line-through text-gray-400' : 'text-white'}">
+                            ${task.name}
+                        </p>
+                        <p class="text-sm ${isOverdue ? 'text-red-400 font-bold' : 'text-gray-400'}">
+                            ${isOverdue ? 'OVERDUE:' : 'Due:'} ${formatTime(task.dueTime)}
+                        </p>
+                    </div>
+                    <div class="flex space-x-2 flex-shrink-0">
+                        <!-- Complete Button -->
+                        <button data-id="${task.id}" data-action="toggle"
+                                class="p-2 rounded-full ${isCompleted ? 'bg-primary/50 text-gray-300' : 'bg-primary hover:bg-indigo-500'} transition duration-150"
+                                title="${isCompleted ? 'Mark as Incomplete' : 'Mark as Complete'}">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
+                            </svg>
+                        </button>
+                        <!-- Delete Button -->
+                        <button data-id="${task.id}" data-action="delete"
+                                class="p-2 rounded-full bg-red-600 hover:bg-red-500 text-white transition duration-150"
+                                title="Delete Task">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                            </svg>
+                        </button>
+                    </div>
+                `;
+                tasksList.appendChild(taskElement);
+            });
+        };
+
+        /**
+         * Handles task submission. (Step 4A)
+         */
+        taskForm.addEventListener('submit', (e) => {
+            e.preventDefault();
+            const name = taskNameInput.value.trim();
+            const dueTimeISO = taskDueTimeInput.value;
+
+            if (name && dueTimeISO) {
+                const newTask = {
+                    id: Date.now(), // Use unique timestamp as ID
+                    name: name,
+                    dueTime: new Date(dueTimeISO).getTime(),
+                    completed: false,
+                    reminded: false,
+                };
+                tasks.push(newTask);
+                
+                scheduleExactReminder(newTask); // NEW: Schedule the precise timer
+                
+                saveTasks();
+                taskForm.reset();
+                taskNameInput.focus();
+                // Check reminders immediately for a quick 5-min pre-reminder check
+                checkReminders(); 
+            }
+        });
+
+        /**
+         * Handles click events for task actions (toggle complete, delete). (Step 4C)
+         */
+        tasksList.addEventListener('click', (e) => {
+            const button = e.target.closest('button');
+            if (!button) return;
+
+            const id = button.dataset.id;
+            const action = button.dataset.action;
+
+            if (id !== undefined) {
+                const taskId = parseInt(id);
+                const taskIndex = tasks.findIndex(t => t.id === taskId);
+                
+                if (taskIndex === -1) return;
+
+                if (action === 'toggle') {
+                    tasks[taskIndex].completed = !tasks[taskIndex].completed;
+                    if (tasks[taskIndex].completed) {
+                        tasks[taskIndex].reminded = false;
+                        cancelExactReminder(taskId); // Cancel timer if completed
+                    } else {
+                        tasks[taskIndex].reminded = false;
+                        scheduleExactReminder(tasks[taskIndex]); // Reschedule if marked incomplete
+                    }
+                    saveTasks();
+                } else if (action === 'delete') {
+                    tasks.splice(taskIndex, 1);
+                    cancelExactReminder(taskId); // Cancel timer if deleted
+                    saveTasks();
+                }
+            }
+        });
+
+        // --- Reminder Agent Logic (Step 5) ---
+
+        /**
+         * Displays the reminder pop-up on the screen and triggers a system notification.
+         * @param {string} message - The message to display.
+         */
+        const showPopup = (message) => {
+            // 1. Show the in-page toast (for when the tab is active)
+            toastMessage.textContent = message;
+            reminderToast.classList.add('active');
+
+            // Automatically hide the in-page toast after 5 seconds
+            setTimeout(() => {
+                reminderToast.classList.remove('active');
+            }, 5000);
+
+            // 2. Show a System Notification (for when the tab is in the background)
+            if (notificationPermission === 'granted') {
+                try {
+                    const title = "Task Manager Agent Alert";
+                    const options = {
+                        body: message,
+                        // Simple icon placeholder for the notification
+                        icon: 'https://placehold.co/64x64/4f46e5/ffffff?text=TMA', 
+                        tag: 'tma-reminder-' + Date.now(), // Unique tag prevents merging older notifications
+                        renotify: true 
+                    };
+                    new Notification(title, options);
+                } catch (e) {
+                    console.error("Failed to show system notification:", e);
+                }
+            }
+        };
+
+        /**
+         * Checks all active tasks against the current time to trigger reminders. 
+         * This function is primarily for the 5-minute pre-reminder check (periodic).
+         */
+        const checkReminders = () => {
+            const now = Date.now();
+            let hasReminder = false;
+
+            tasks.forEach(task => {
+                if (task.completed || task.reminded) return;
+
+                const timeDiff = task.dueTime - now; // Difference in milliseconds
+                const secondsDiff = Math.floor(timeDiff / 1000);
+
+                let reminderText = '';
+                let shouldRemind = false;
+
+                // Reminder 1: Due within 5 minutes (300 seconds)
+                if (secondsDiff > 0 && secondsDiff <= 300) {
+                    reminderText = `The Task "${task.name}" is due in less than 5 minutes! Initiate focus sequence.`;
+                    shouldRemind = true;
+                }
+                // NOTE: The 'due NOW' check is removed here, as it's handled precisely by scheduleExactReminder
+
+                if (shouldRemind && !hasReminder) {
+                    showPopup(reminderText);
+                    task.reminded = true;
+                    hasReminder = true;
+                    saveTasks();
+                }
+            });
+        };
+
+        // Initialize the app
+        document.addEventListener('DOMContentLoaded', () => {
+            // Set the minimum possible datetime-local value to prevent scheduling in the past
+            const now = new Date();
+            now.setMinutes(now.getMinutes() + 5);
+            const minDateTime = now.toISOString().substring(0, 16);
+            taskDueTimeInput.setAttribute('min', minDateTime);
+
+            requestNotificationPermission(); // Request permission first
+            
+            loadTasks();
+            // Start the periodic check loop for the 5-minute pre-reminder
+            setInterval(checkReminders, REMINDER_CHECK_INTERVAL_MS);
+            
+            // Close button for the toast
+            document.getElementById('close-toast').addEventListener('click', () => {
+                reminderToast.classList.remove('active');
+            });
+        });
+    </script>
+</body>
+
+</html>
