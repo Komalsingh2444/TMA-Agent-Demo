@@ -86,7 +86,5 @@ Future enhancements could evolve the TMA into a more robust and scalable solutio
 •User Authentication: Implement sign-in functionality to personalize task lists and improve security.
 •Improved UX: Use a dedicated library for modals/toasts instead of custom CSS/JS for better accessibility and animation control.
 
-<p>
     Check out the full video demonstration: 
     <a href="[YOUR_GOOGLE_DRIVE_SHARE_LINK](https://drive.google.com/file/d/1zLnegmUxQkxpyrDydAkFM_p1oJiiaXhi/view?usp=sharing)" target="_blank">Task Manager Agent Demo Video</a>
-</p>
